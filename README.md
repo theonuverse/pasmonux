@@ -11,7 +11,7 @@ yes | pkg up
 pkg install wget -y
 wget -c https://github.com/theonuverse/pasmonux/releases/download/v0.1.0/{pasmonux,rish,rish_shizuku.dex}
 chmod +x pasmonux rish
-cp pasmonux, rish, rish_shizuku.dex $PREFIX/bin/
+cp pasmonux rish rish_shizuku.dex $PREFIX/bin/
 ```
 
 Usage
