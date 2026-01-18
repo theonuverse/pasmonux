@@ -2,28 +2,16 @@
 Device Monitoring API for Termux using Shizuku
 
 Prerequisites
-- Termux, Shizuku
-- `git` and `rust` (see quick install below)
-- Shizuku and `rish` set up
+- Termux, Shizuku set up
+
+Quick install
 
 ```sh
 yes | pkg up
-pkg install git rust
-```
-
-Clone the repo
-
-```sh
-git clone https://github.com/theonuverse/pasmonux.git
-cd pasmonux
-```
-
-Install
-
-```sh
-echo "export PATH=$PATH:$HOME/.cargo/bin" > $HOME/.bashrc
-source $HOME/.bashrc
-cargo install --path .
+pkg install wget -y
+wget -c https://github.com/theonuverse/pasmonux/releases/download/v0.1.0/{pasmonux,rish,rish_shizuku.dex}
+chmod +x pasmonux rish
+cp pasmonux, rish, rish_shizuku.dex $PREFIX/bin/
 ```
 
 Usage
