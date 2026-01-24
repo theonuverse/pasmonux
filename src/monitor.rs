@@ -13,11 +13,19 @@ pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: Devic
 
     let mut prev_total: u64 = 0;
     let mut prev_idle: u64 = 0;
-    let mut core_snaps: Vec<CpuSnap> = vec![CpuSnap { total: 0, idle: 0 }; paths.core_count];
+    // Initialize core snaps based on static_info to ensure we track all cores (0-7)
+    let mut core_snaps: Vec<CpuSnap> = vec![CpuSnap { total: 0, idle: 0 }; static_info.cores.len()];
 
-    // Full batch command: uptime, temps, /proc/stat, meminfo, battery, and current CPU freqs via rish
+    // Improved Batch Command with explicit labels for safer parsing
     let full_cmd = format!(
-        "cat /proc/uptime {} {}; cat /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo; dumpsys battery | grep -E 'level|status|temp'; echo CUR_FREQ_START; cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; echo CUR_FREQ_END; echo 'END_OF_BATCH'\n",
+        "echo UPTIME $(cat /proc/uptime); \
+         echo CPU_TEMP $(cat {}); \
+         echo GPU_TEMP $(cat {}); \
+         cat /proc/stat; \
+         grep -E 'MemTotal|MemAvailable' /proc/meminfo; \
+         dumpsys battery | grep -E 'level|status|temp'; \
+         echo CUR_FREQ_START; cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; echo CUR_FREQ_END; \
+         echo 'END_OF_BATCH'\n",
         paths.cpu_temp, paths.gpu_temp
     );
 
@@ -33,26 +41,30 @@ pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: Devic
         let mut battery_level = 0i32;
         let mut battery_status: &'static str = "N/A";
         let mut uptime_seconds = 0u64;
-        let mut core_usages: Vec<f32> = Vec::with_capacity(paths.core_count);
-        let mut raw_numeric_dump: Vec<f32> = Vec::with_capacity(4);
-        let mut cur_freqs: Vec<f32> = Vec::with_capacity(paths.core_count);
+        let mut core_usages: Vec<f32> = vec![0.0; static_info.cores.len()];
+        let mut cur_freqs: Vec<f32> = Vec::with_capacity(static_info.cores.len());
         let mut collecting_freqs = false;
 
         while let Some(Ok(line)) = lines.next() {
+            let line = line.trim();
             if line == "END_OF_BATCH" { break; }
             if line == "CUR_FREQ_START" { collecting_freqs = true; continue; }
             if line == "CUR_FREQ_END" { collecting_freqs = false; continue; }
+            
             if collecting_freqs {
-                if let Ok(v) = line.trim().parse::<f32>() {
-                    // scaling_cur_freq is in kHz on Android, convert to MHz
+                if let Ok(v) = line.parse::<f32>() {
                     cur_freqs.push(v / 1000.0);
                 }
                 continue;
             }
+
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.is_empty() { continue; }
 
             match parts[0] {
+                "UPTIME" => uptime_seconds = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) as u64,
+                "CPU_TEMP" => cpu_temp = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 1000.0,
+                "GPU_TEMP" => gpu_temp = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 1000.0,
                 "cpu" => {
                     let (t, i) = calculate_usage(&parts);
                     if prev_total > 0 {
@@ -62,44 +74,31 @@ pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: Devic
                     }
                     prev_total = t; prev_idle = i;
                 }
+                // Fix: Specifically target cpu0 through cpuN
                 p if p.starts_with("cpu") && p.len() > 3 => {
                     if let Ok(core_idx) = p[3..].parse::<usize>() {
-                        let (t, i) = calculate_usage(&parts);
-                        let mut usage = 0.0;
                         if core_idx < core_snaps.len() {
+                            let (t, i) = calculate_usage(&parts);
                             let dt = t.saturating_sub(core_snaps[core_idx].total);
                             let di = i.saturating_sub(core_snaps[core_idx].idle);
-                            if dt > 0 { usage = (dt - di) as f32 / dt as f32 * 100.0; }
+                            
+                            if dt > 0 {
+                                core_usages[core_idx] = (dt - di) as f32 / dt as f32 * 100.0;
+                            }
                             core_snaps[core_idx] = CpuSnap { total: t, idle: i };
                         }
-                        // Ensure vector is large enough
-                        while core_usages.len() <= core_idx {
-                            core_usages.push(0.0);
-                        }
-                        core_usages[core_idx] = usage;
                     }
                 }
-                "MemTotal:" => memory_total_gb = parts[1].parse::<f32>().unwrap_or(0.0) / 1048576.0,
-                "MemAvailable:" => memory_available_gb = parts[1].parse::<f32>().unwrap_or(0.0) / 1048576.0,
-                "level:" => battery_level = parts[1].parse().unwrap_or(0),
-                "status:" => battery_status = map_status(parts[1].parse().unwrap_or(0)),
-                "temperature:" => battery_temp = parts[1].parse::<f32>().unwrap_or(0.0) / 10.0,
-                _ => {
-                    if let Ok(val) = parts[0].parse::<f32>() {
-                        raw_numeric_dump.push(val);
-                    }
-                }
+                "MemTotal:" => memory_total_gb = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 1048576.0,
+                "MemAvailable:" => memory_available_gb = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 1048576.0,
+                "level:" => battery_level = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0),
+                "status:" => battery_status = map_status(parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0)),
+                "temperature:" => battery_temp = parts.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 10.0,
+                _ => {}
             }
         }
 
-        // Mapping: uptime, cpu_temp, gpu_temp
-        if raw_numeric_dump.len() >= 3 {
-            uptime_seconds = raw_numeric_dump[0] as u64;
-            cpu_temp = raw_numeric_dump[1] / 1000.0;
-            gpu_temp = raw_numeric_dump[2] / 1000.0;
-        }
-
-        // Build cores with static info + dynamic usage + current frequency
+        // Build core data using the fixed-size vector
         let cores: Vec<CoreData> = static_info.cores.iter().enumerate().map(|(i, info)| {
             CoreData {
                 name: info.name.clone(),
@@ -116,7 +115,7 @@ pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: Devic
             product_model: static_info.product_model.clone(),
             soc_model: static_info.soc_model.clone(),
             total_cpu,
-            memory_used_gb: memory_total_gb - memory_available_gb,
+            memory_used_gb: (memory_total_gb - memory_available_gb).max(0.0),
             memory_total_gb,
             cpu_temp,
             gpu_temp,
@@ -133,9 +132,12 @@ pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: Devic
 }
 
 fn calculate_usage(p: &[&str]) -> (u64, u64) {
-    let vals: Vec<u64> = p.iter().skip(1).take(8).filter_map(|s| s.parse().ok()).collect();
-    if vals.len() < 5 { return (0, 0); }
-    (vals.iter().sum(), vals[3] + vals.get(4).unwrap_or(&0))
+    // /proc/stat columns: user, nice, system, idle, iowait, irq, softirq, steal
+    let vals: Vec<u64> = p.iter().skip(1).filter_map(|s| s.parse().ok()).collect();
+    if vals.len() < 4 { return (0, 0); }
+    let total: u64 = vals.iter().take(8).sum();
+    let idle: u64 = vals[3] + vals.get(4).unwrap_or(&0); // idle + iowait
+    (total, idle)
 }
 
 fn map_status(c: i32) -> &'static str {
