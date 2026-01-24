@@ -71,5 +71,4 @@ pub struct StaticDeviceInfo {
 pub struct DevicePaths {
     pub cpu_temp: String,
     pub gpu_temp: String,
-    pub core_count: usize,
 }
