@@ -2,18 +2,23 @@ use serde::Serialize;
 
 #[derive(Serialize, Clone)]
 pub struct SystemStats {
+    // 1. Static Device Info
     pub manufacturer: String,
     pub product_model: String,
     pub soc_model: String,
-    pub total_cpu: f32,
-    pub memory_used_gb: f32,
-    pub memory_total_gb: f32,
-    pub cpu_temp: f32,
-    pub gpu_temp: f32,
-    pub battery_temp: f32,
+
+    // 2. System-wide Metrics
+    pub uptime_seconds: u64,
     pub battery_level: i32,
     pub battery_status: &'static str,
-    pub uptime_seconds: u64,
+    pub battery_temp: f32,
+    pub cpu_temp: f32,
+    pub gpu_temp: f32,
+    pub gpu_load: f32, // Unifying naming convention
+    pub memory_used_mb: f32,
+    pub memory_total_mb: f32,
+
+    // 3. Core Data (Last)
     pub cores: Vec<CoreData>,
 }
 
@@ -23,15 +28,15 @@ impl Default for SystemStats {
             manufacturer: String::new(),
             product_model: String::new(),
             soc_model: String::new(),
-            total_cpu: 0.0,
-            memory_used_gb: 0.0,
-            memory_total_gb: 0.0,
-            cpu_temp: 0.0,
-            gpu_temp: 0.0,
-            battery_temp: 0.0,
+            uptime_seconds: 0,
             battery_level: 0,
             battery_status: "N/A",
-            uptime_seconds: 0,
+            battery_temp: 0.0,
+            cpu_temp: 0.0,
+            gpu_temp: 0.0,
+            gpu_load: 0.0,
+            memory_used_mb: 0.0,
+            memory_total_mb: 0.0,
             cores: Vec::new(),
         }
     }
