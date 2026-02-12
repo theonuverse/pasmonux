@@ -19,13 +19,17 @@ use crate::types::SystemStats;
 ///
 /// # Routes
 ///
-/// | Method | Path                    | Description                        |
-/// |--------|-------------------------|------------------------------------|
-/// | `GET`  | `/`                     | API index — lists every endpoint   |
-/// | `GET`  | `/stats`                | Full system stats snapshot         |
-/// | `GET`  | `/<field>`              | Single top-level field             |
-/// | `GET`  | `/cores/<name>`         | Single core by name                |
-/// | `GET`  | `/cores/<name>/<field>` | Single field of a specific core    |
+/// | Method | Path                          | Description                           |
+/// |--------|-------------------------------|---------------------------------------|
+/// | `GET`  | `/`                           | API index — lists every endpoint      |
+/// | `GET`  | `/stats`                      | Full system stats snapshot            |
+/// | `GET`  | `/<field>`                    | Single top-level field                |
+/// | `GET`  | `/<f1>,<f2>,…`                | Multiple fields in one request        |
+/// | `GET`  | `/cores/<name>`               | Single core by name                   |
+/// | `GET`  | `/cores/<name>/<field>`       | Single field of a specific core       |
+/// | `GET`  | `/cores/<name>/<f1>,<f2>,…`   | Multiple core fields                  |
+/// | `GET`  | `/cores/*/<field>`            | Field from every core (wildcard)      |
+/// | `GET`  | `/cores/all/<f1>,<f2>,…`      | Multiple fields from every core       |
 pub fn build(rx: watch::Receiver<SystemStats>) -> Router {
     Router::new()
         .route("/", get(index))
@@ -47,6 +51,8 @@ async fn index(State(rx): State<watch::Receiver<SystemStats>>) -> Json<Value> {
         "name": "asmo",
         "version": env!("CARGO_PKG_VERSION"),
         "endpoints": endpoints,
+        "multi_field": "Combine fields with commas: /battery_level,cpu_temp,gpu_load",
+        "wildcard": "Use * or 'all' for arrays: /cores/*/usage  /cores/all/usage,cur_freq",
         "usage": "GET any endpoint to retrieve its data."
     }))
 }
@@ -57,6 +63,9 @@ async fn stats(State(rx): State<watch::Receiver<SystemStats>>) -> Json<SystemSta
 }
 
 /// `GET /{path}` — Resolves an arbitrary path against the current stats.
+///
+/// Supports comma-separated fields in the last segment and wildcards (`*` / `all`)
+/// for array expansion, e.g. `/cores/*/usage` or `/cores/all/usage,cur_freq`.
 async fn resolve(
     State(rx): State<watch::Receiver<SystemStats>>,
     Path(path): Path<String>,
@@ -64,39 +73,40 @@ async fn resolve(
     let stats = rx.borrow().clone();
     let tree = match serde_json::to_value(&stats) {
         Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "internal serialization error"})),
-            )
-                .into_response();
-        }
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal serialization error", &path),
     };
 
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-    match resolve_path(&tree, &segments) {
+    match resolve_request(&tree, &segments) {
         Some(v) => Json(v).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "not found",
-                "path": format!("/{path}"),
-                "hint": "GET / for available endpoints"
-            })),
-        )
-            .into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "not found", &path),
     }
+}
+
+/// Build a JSON error response with a hint pointing to the index.
+fn error_response(status: StatusCode, message: &str, path: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": message,
+            "path": format!("/{path}"),
+            "hint": "GET / for available endpoints"
+        })),
+    )
+        .into_response()
 }
 
 // ─── Path resolution ───────────────────────────────────────────────────────
 
-/// Walks the JSON value tree using the given URL path segments.
-///
-/// - **Objects** — keys map directly to child values.
-/// - **Arrays** — items are matched by their `"name"` field (e.g. `"cpu0"`).
-/// - **Leaf nodes** — returned wrapped as `{ "key": value }`.
-fn resolve_path(value: &Value, segments: &[&str]) -> Option<Value> {
+/// Returns `true` for wildcard tokens (`*` and `all`).
+#[inline]
+fn is_wildcard(s: &str) -> bool {
+    s == "*" || s == "all"
+}
+
+/// Navigate the JSON tree and return the **raw** value at the given path.
+fn navigate(value: &Value, segments: &[&str]) -> Option<Value> {
     if segments.is_empty() {
         return Some(value.clone());
     }
@@ -105,26 +115,96 @@ fn resolve_path(value: &Value, segments: &[&str]) -> Option<Value> {
     let rest = &segments[1..];
 
     match value {
+        Value::Object(map) => navigate(map.get(key)?, rest),
+        Value::Array(arr) => {
+            let item = arr
+                .iter()
+                .find(|v| v.get("name").and_then(Value::as_str) == Some(key))?;
+            navigate(item, rest)
+        }
+        _ => None,
+    }
+}
+
+/// Fully resolve a request path.  Handles all query patterns:
+///
+/// - Single field:      `/battery_level`           → `{"battery_level": 100}`
+/// - Comma fields:      `/cpu_temp,gpu_temp`       → `{"cpu_temp": 34.4, …}`
+/// - Wildcard:          `/cores/*/usage`            → `[{"name":"cpu0","usage":…}, …]`
+/// - Wildcard + commas: `/cores/all/usage,cur_freq` → `[{"name":"cpu0","usage":…,"cur_freq":…}, …]`
+fn resolve_request(value: &Value, segments: &[&str]) -> Option<Value> {
+    if segments.is_empty() {
+        return Some(value.clone());
+    }
+
+    let current = segments[0];
+    let rest = &segments[1..];
+    let is_last = rest.is_empty();
+
+    // ── Comma-separated fields (last segment only) ──────────────────────
+    if is_last && current.contains(',') {
+        return resolve_comma_fields(value, current);
+    }
+
+    // ── Wildcard: expand over every item in an array ────────────────────
+    if is_wildcard(current) {
+        let Value::Array(arr) = value else { return None };
+        let results: Vec<Value> = arr
+            .iter()
+            .filter_map(|item| {
+                if is_last {
+                    return Some(item.clone());
+                }
+                let resolved = resolve_request(item, rest)?;
+                Some(attach_name(resolved, item.get("name").cloned()))
+            })
+            .collect();
+        return if results.is_empty() { None } else { Some(Value::Array(results)) };
+    }
+
+    // ── Standard navigation ─────────────────────────────────────────────
+    match value {
         Value::Object(map) => {
-            let child = map.get(key)?;
-            if rest.is_empty() {
-                Some(serde_json::json!({ key: child }))
+            let child = map.get(current)?;
+            if is_last {
+                Some(serde_json::json!({ current: child }))
             } else {
-                resolve_path(child, rest)
+                resolve_request(child, rest)
             }
         }
         Value::Array(arr) => {
             let item = arr
                 .iter()
-                .find(|v| v.get("name").and_then(Value::as_str) == Some(key))?;
-            if rest.is_empty() {
+                .find(|v| v.get("name").and_then(Value::as_str) == Some(current))?;
+            if is_last {
                 Some(item.clone())
             } else {
-                resolve_path(item, rest)
+                resolve_request(item, rest)
             }
         }
         _ => None,
     }
+}
+
+/// Extract comma-separated fields from a value.
+fn resolve_comma_fields(value: &Value, raw: &str) -> Option<Value> {
+    let mut result = serde_json::Map::new();
+    for field in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(val) = navigate(value, &[field]) {
+            result.insert(field.to_string(), val);
+        }
+    }
+    if result.is_empty() { None } else { Some(Value::Object(result)) }
+}
+
+/// Prepend a `"name"` key to an object for identification in wildcard results.
+fn attach_name(value: Value, name: Option<Value>) -> Value {
+    let Some(name_val) = name else { return value };
+    let Value::Object(fields) = value else { return value };
+    let mut out = serde_json::Map::with_capacity(fields.len() + 1);
+    out.insert("name".to_string(), name_val);
+    out.extend(fields);
+    Value::Object(out)
 }
 
 // ─── Endpoint enumeration ──────────────────────────────────────────────────

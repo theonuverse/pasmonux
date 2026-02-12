@@ -22,23 +22,11 @@ pub async fn run_monitor(
 ) {
     let core_len = static_info.cores.len();
 
-    // Build the shell command string once.
-    let cmd = format!(
-        "echo UPTIME $(cat /proc/uptime); \
-         echo CPU_TEMP $(cat {cpu_temp}); \
-         echo GPU_TEMP $(cat {gpu_temp}); \
-         echo GPU_BUSY $(cat /sys/class/kgsl/kgsl-3d0/gpubusy); \
-         cat /proc/stat; \
-         grep -E 'MemTotal|MemAvailable' /proc/meminfo; \
-         dumpsys battery | grep -E 'level|status|temp'; \
-         echo CUR_FREQ_START; \
-         cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; \
-         echo CUR_FREQ_END; \
-         echo 'END_OF_BATCH'\n",
-        cpu_temp = paths.cpu_temp,
-        gpu_temp = paths.gpu_temp,
-    );
-    let cmd_bytes = cmd.as_bytes();
+    // Rish batch — only commands that require elevated privileges.
+    let cmd = b"echo UPTIME $(cat /proc/uptime); \
+               cat /proc/stat; \
+               dumpsys battery | grep -E 'level|status|temp'; \
+               echo 'END_OF_BATCH'\n";
 
     // Spawn a single long-lived `rish` shell.
     let mut child = Command::new("rish")
@@ -59,28 +47,26 @@ pub async fn run_monitor(
     // Pre-allocated scratch space — reused every tick.
     let mut core_snaps: Vec<CpuSnap> = (0..core_len).map(|_| CpuSnap::default()).collect();
     let mut core_usages = vec![0.0_f32; core_len];
-    let mut cur_freqs = Vec::<f32>::with_capacity(core_len);
 
     loop {
-        // Send the batch command.
-        if stdin.write_all(cmd_bytes).is_err() || stdin.flush().is_err() {
+        // ── Direct sysfs/procfs reads (no privilege needed) ──────────
+        let cpu_temp = read_sysfs_thermal(&paths.cpu_temp);
+        let gpu_temp = read_sysfs_thermal(&paths.gpu_temp);
+        let gpu_load = read_gpu_load();
+        let (memory_total_mb, memory_avail_mb) = read_memory();
+        let cur_freqs = read_cpu_freqs(core_len);
+
+        // ── Privileged reads via rish ────────────────────────────────
+        if stdin.write_all(cmd).is_err() || stdin.flush().is_err() {
             break;
         }
 
-        // Reset per-tick scratch.
         core_usages.iter_mut().for_each(|u| *u = 0.0);
-        cur_freqs.clear();
 
-        let mut gpu_load = 0.0_f32;
-        let mut memory_total_mb = 0.0_f32;
-        let mut memory_avail_mb = 0.0_f32;
-        let mut cpu_temp = 0.0_f32;
-        let mut gpu_temp = 0.0_f32;
         let mut battery_temp = 0.0_f32;
         let mut battery_level = 0_i32;
         let mut battery_status = BatteryStatus::Unknown;
         let mut uptime_seconds = 0_u64;
-        let mut collecting_freqs = false;
 
         while let Some(Ok(raw_line)) = lines.next() {
             let line = raw_line.trim();
@@ -88,23 +74,7 @@ pub async fn run_monitor(
             if line == "END_OF_BATCH" {
                 break;
             }
-            if line == "CUR_FREQ_START" {
-                collecting_freqs = true;
-                continue;
-            }
-            if line == "CUR_FREQ_END" {
-                collecting_freqs = false;
-                continue;
-            }
 
-            if collecting_freqs {
-                if let Ok(v) = line.parse::<f32>() {
-                    cur_freqs.push(v / 1000.0);
-                }
-                continue;
-            }
-
-            // Fast: grab the first token without allocating a Vec.
             let (tag, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
 
             match tag {
@@ -115,32 +85,8 @@ pub async fn run_monitor(
                         .and_then(|v| v.parse::<f32>().ok())
                         .unwrap_or(0.0) as u64;
                 }
-                "CPU_TEMP" => {
-                    cpu_temp = parse_or_zero(rest.trim()) / 1000.0;
-                }
-                "GPU_TEMP" => {
-                    gpu_temp = parse_or_zero(rest.trim()) / 1000.0;
-                }
-                "GPU_BUSY" => {
-                    let mut it = rest.split_whitespace();
-                    let busy: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let total: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                    gpu_load = if total > 0 {
-                        busy as f32 / total as f32 * 100.0
-                    } else {
-                        0.0
-                    };
-                }
                 "cpu" => { /* aggregate line — skip */ }
-                "MemTotal:" => {
-                    memory_total_mb = parse_or_zero(rest.trim()) / 1024.0;
-                }
-                "MemAvailable:" => {
-                    memory_avail_mb = parse_or_zero(rest.trim()) / 1024.0;
-                }
-                "level:" => {
-                    battery_level = rest.trim().parse().unwrap_or(0);
-                }
+                "level:" => battery_level = rest.trim().parse().unwrap_or(0),
                 "status:" => {
                     battery_status =
                         BatteryStatus::from_code(rest.trim().parse().unwrap_or(0));
@@ -203,7 +149,67 @@ pub async fn run_monitor(
 }
 
 // ---------------------------------------------------------------------------
-// Tiny helpers — kept out of the hot path's match for readability.
+// Direct sysfs/procfs readers — no privilege needed.
+// ---------------------------------------------------------------------------
+
+/// Read a thermal zone temperature, returns degrees Celsius.
+#[inline]
+fn read_sysfs_thermal(path: &str) -> f32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0)
+        / 1000.0
+}
+
+/// Read GPU load from kgsl sysfs.
+#[inline]
+fn read_gpu_load() -> f32 {
+    let content =
+        std::fs::read_to_string("/sys/class/kgsl/kgsl-3d0/gpubusy").unwrap_or_default();
+    let mut it = content.split_whitespace();
+    let busy: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let total: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if total > 0 {
+        busy as f32 / total as f32 * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Read MemTotal and MemAvailable from `/proc/meminfo`, returns (total_mb, available_mb).
+#[inline]
+fn read_memory() -> (f32, f32) {
+    let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total = 0.0_f32;
+    let mut avail = 0.0_f32;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total = parse_or_zero(rest.trim()) / 1024.0;
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail = parse_or_zero(rest.trim()) / 1024.0;
+        }
+    }
+    (total, avail)
+}
+
+/// Read current frequency for each core from sysfs, returns MHz.
+fn read_cpu_freqs(count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|i| {
+            std::fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
+            ))
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .unwrap_or(0.0)
+                / 1000.0
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Parsing helpers — rish output.
 // ---------------------------------------------------------------------------
 
 /// Parse the first whitespace-delimited token as `f32`, defaulting to `0.0`.

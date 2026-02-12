@@ -1,3 +1,4 @@
+use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -31,40 +32,47 @@ pub fn discover_device_layout() -> (DevicePaths, StaticDeviceInfo) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Probe sysfs thermal zones and CPU topology via `rish`.
+/// Probe sysfs thermal zones and CPU topology directly (no `rish` needed).
 fn probe_thermal_and_cores() -> (String, String, usize) {
-    let output = Command::new("rish")
-        .args([
-            "-c",
-            "for f in /sys/class/thermal/thermal_zone*/type; do \
-                 echo \"$f:$(cat $f)\"; \
-             done; \
-             ls -d /sys/devices/system/cpu/cpu[0-9]* | sort -V",
-        ])
-        .output()
-        .expect("sysfs probe via rish failed");
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-
     let mut cpu_temp = "/sys/class/thermal/thermal_zone0/temp".to_owned();
     let mut gpu_temp = "/sys/class/thermal/thermal_zone1/temp".to_owned();
     let mut core_count = 0_usize;
 
-    for line in raw.lines() {
-        if line.contains("/thermal_zone") {
-            let lower = line.to_ascii_lowercase();
+    // Scan thermal zones directly from sysfs.
+    if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
+        let mut zones: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("thermal_zone"))
+            .collect();
+        zones.sort_by_key(|e| e.file_name());
+
+        for entry in zones {
+            let type_path = entry.path().join("type");
+            let Ok(zone_type) = fs::read_to_string(&type_path) else { continue };
+            let lower = zone_type.trim().to_ascii_lowercase();
+            let temp_path = entry.path().join("temp").to_string_lossy().into_owned();
+
             if lower.contains("cpuss-0") || lower.contains("aoss-0") {
-                if let Some(path) = line.split(':').next() {
-                    cpu_temp = path.replace("type", "temp");
-                }
-            } else if lower.contains("gpuss-0")
-                && let Some(path) = line.split(':').next()
-            {
-                gpu_temp = path.replace("type", "temp");
+                cpu_temp = temp_path;
+            } else if lower.contains("gpuss-0") {
+                gpu_temp = temp_path;
             }
-        } else if line.contains("/cpu/cpu") {
-            core_count += 1;
         }
+    }
+
+    // Count CPU cores directly from sysfs.
+    // The glob `/cpu[0-9]*` matches cpu0, cpu1, …, cpu10, cpu99, etc.
+    // The [0-9] prefix filters out non-core dirs like cpufreq and cpuidle.
+    if let Ok(entries) = fs::read_dir("/sys/devices/system/cpu") {
+        core_count = entries
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.starts_with("cpu")
+                    && s.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit())
+            })
+            .count();
     }
 
     (cpu_temp, gpu_temp, core_count)
