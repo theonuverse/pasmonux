@@ -26,42 +26,24 @@ All endpoints use **GET** requests.
 | `/` | API index — lists every available endpoint |
 | `/stats` | Full system stats snapshot |
 
-### Device
+### Single fields
+
+Every top-level field in the stats is its own endpoint:
 
 | Endpoint | Returns |
 |---|---|
 | `/manufacturer` | `{"manufacturer": "Nothing"}` |
 | `/product_model` | `{"product_model": "A065"}` |
 | `/soc_model` | `{"soc_model": "SM8475"}` |
-
-### System
-
-| Endpoint | Returns |
-|---|---|
 | `/uptime_seconds` | `{"uptime_seconds": 8928}` |
-| `/memory_used_mb` | `{"memory_used_mb": 5585.789}` |
-| `/memory_total_mb` | `{"memory_total_mb": 11260.543}` |
-
-### Thermal
-
-| Endpoint | Returns |
-|---|---|
-| `/cpu_temp` | `{"cpu_temp": 34.4}` |
-| `/gpu_temp` | `{"gpu_temp": 34.098}` |
-
-### Battery
-
-| Endpoint | Returns |
-|---|---|
 | `/battery_level` | `{"battery_level": 100}` |
 | `/battery_status` | `{"battery_status": "Full"}` |
 | `/battery_temp` | `{"battery_temp": 31.0}` |
-
-### GPU
-
-| Endpoint | Returns |
-|---|---|
+| `/cpu_temp` | `{"cpu_temp": 34.4}` |
+| `/gpu_temp` | `{"gpu_temp": 34.098}` |
 | `/gpu_load` | `{"gpu_load": 5.27}` |
+| `/memory_used_mb` | `{"memory_used_mb": 5585.789}` |
+| `/memory_total_mb` | `{"memory_total_mb": 11260.543}` |
 
 ### Per-core CPU
 
@@ -79,20 +61,21 @@ All endpoints use **GET** requests.
 
 ### Multi-field queries
 
-Combine any fields with commas to fetch multiple values in a single request:
+Combine fields with commas to fetch multiple values in one request. **Fields are returned in the order you specify:**
 
 | Endpoint | Returns |
 |---|---|
 | `/battery_level,battery_status` | `{"battery_level": 100, "battery_status": "Full"}` |
 | `/cpu_temp,gpu_temp,gpu_load` | `{"cpu_temp": 34.4, "gpu_temp": 34.1, "gpu_load": 5.27}` |
-| `/manufacturer,product_model,soc_model` | `{"manufacturer": "Nothing", ...}` |
+| `/manufacturer,product_model,soc_model` | `{"manufacturer": "Nothing", "product_model": "A065", "soc_model": "SM8475"}` |
 | `/cores/cpu0/usage,cur_freq` | `{"usage": 28.57, "cur_freq": 1804.8}` |
+| `/cores/cpu0/usage,name,model_name` | `{"usage": 28.57, "name": "cpu0", "model_name": "Cortex-A510"}` |
 
 > Works at any level — top-level fields, or fields within a specific core.
 
 ### Wildcards
 
-Use `*` or `all` to query a field from **every** item in an array:
+Use `*` or `all` to query a field from **every** item in an array. Each result includes the core's `name` for identification:
 
 | Endpoint | Description |
 |---|---|
@@ -101,7 +84,7 @@ Use `*` or `all` to query a field from **every** item in an array:
 | `/cores/*/usage,cur_freq` | Usage + frequency of every core |
 | `/cores/all/cur_freq,model_name` | Frequency + model of every core |
 
-> `*` requires shell quoting: `curl -s 'localhost:3000/cores/*/usage'`
+> **Shell note:** `*` requires quoting in shell: `curl -s 'localhost:3000/cores/*/usage'`
 > `all` needs no quoting: `curl -s localhost:3000/cores/all/usage`
 
 ### Dynamic routing
@@ -118,6 +101,16 @@ Unknown paths return `404` with a helpful JSON body:
   "path": "/nonexistent",
   "hint": "GET / for available endpoints"
 }
+```
+
+### Design note: scope of comma queries
+
+Comma-separated fields work within a **single path level** — for example `/battery_level,cpu_temp` (top-level) or `/cores/cpu0/usage,cur_freq` (within a core). Mixing different path depths (like `/gpu_load,cores/all/usage`) is not possible because `/` is the HTTP path separator, meaning the server would interpret it as nested segments rather than separate fields.
+
+For mixed-depth queries, use `/stats` with jq:
+
+```sh
+curl -s localhost:3000/stats | jq '{gpu_load, cores: [.cores[] | {name, usage}]}'
 ```
 
 <details>
@@ -258,25 +251,6 @@ Open the printed URL from any device on the same network.
 curl -s localhost:3000/ | jq .
 ```
 
-```json
-{
-  "name": "asmo",
-  "version": "0.3.0",
-  "endpoints": [
-    "/stats",
-    "/manufacturer",
-    "/battery_level",
-    "/cores",
-    "/cores/cpu0",
-    "/cores/cpu0/usage",
-    "..."
-  ],
-  "multi_field": "Combine fields with commas: /battery_level,cpu_temp,gpu_load",
-  "wildcard": "Use * or 'all' for arrays: /cores/*/usage  /cores/all/usage,cur_freq",
-  "usage": "GET any endpoint to retrieve its data."
-}
-```
-
 ### Full stats
 
 ```sh
@@ -286,30 +260,25 @@ curl -s localhost:3000/stats | jq .
 ### Single fields
 
 ```sh
-# Battery level
 curl -s localhost:3000/battery_level
 # → {"battery_level":100}
 
-# GPU load
 curl -s localhost:3000/gpu_load
 # → {"gpu_load":5.27}
 
-# CPU temperature
 curl -s localhost:3000/cpu_temp
 # → {"cpu_temp":34.4}
-
-# Battery status
-curl -s localhost:3000/battery_status
-# → {"battery_status":"Full"}
-
-# Memory usage
-curl -s localhost:3000/memory_used_mb
-# → {"memory_used_mb":5585.789}
 ```
 
 ### Multiple fields at once
 
+Fields are returned in the order you specify.
+
 ```sh
+# Your order: usage first, then name, then model
+curl -s localhost:3000/cores/cpu0/usage,name,model_name | jq .
+# → {"usage":28.57,"name":"cpu0","model_name":"Cortex-A510"}
+
 # Device identity
 curl -s localhost:3000/manufacturer,product_model,soc_model | jq .
 # → {"manufacturer":"Nothing","product_model":"A065","soc_model":"SM8475"}
@@ -321,10 +290,6 @@ curl -s localhost:3000/cpu_temp,gpu_temp,gpu_load | jq .
 # Battery summary
 curl -s localhost:3000/battery_level,battery_status,battery_temp | jq .
 # → {"battery_level":100,"battery_status":"Full","battery_temp":31.0}
-
-# Core-specific multi-field
-curl -s localhost:3000/cores/cpu0/usage,cur_freq,model_name | jq .
-# → {"usage":28.57,"cur_freq":1804.8,"model_name":"Cortex-A510"}
 ```
 
 ### Per-core CPU data
@@ -332,20 +297,7 @@ curl -s localhost:3000/cores/cpu0/usage,cur_freq,model_name | jq .
 ```sh
 # Full snapshot of cpu0
 curl -s localhost:3000/cores/cpu0 | jq .
-```
 
-```json
-{
-  "name": "cpu0",
-  "usage": 28.57,
-  "model_name": "Cortex-A510",
-  "cur_freq": 1804.8,
-  "min_freq": 300,
-  "max_freq": 1804.8
-}
-```
-
-```sh
 # Just the usage of cpu0
 curl -s localhost:3000/cores/cpu0/usage
 # → {"usage":28.57}
@@ -353,16 +305,6 @@ curl -s localhost:3000/cores/cpu0/usage
 # Current frequency of cpu4
 curl -s localhost:3000/cores/cpu4/cur_freq
 # → {"cur_freq":1766.4}
-
-# Model name of cpu7
-curl -s localhost:3000/cores/cpu7/model_name
-# → {"model_name":"Cortex-X2"}
-```
-
-### All cores at once
-
-```sh
-curl -s localhost:3000/cores | jq .
 ```
 
 ### Wildcard queries
@@ -385,7 +327,7 @@ curl -s 'localhost:3000/cores/*/usage' | jq .
 # Shell-friendly alternative — no quoting needed
 curl -s localhost:3000/cores/all/usage | jq .
 
-# Multiple fields from every core
+# Multiple fields from every core — your field order is preserved
 curl -s localhost:3000/cores/all/usage,cur_freq,model_name | jq .
 ```
 
@@ -404,7 +346,7 @@ curl -s localhost:3000/cores/all/usage,cur_freq,model_name | jq .
 watch -n2 'curl -s localhost:3000/battery_level'
 
 # Poll GPU load + temps
-watch -n2 'curl -s localhost:3000/stats | jq "{gpu_load, gpu_temp, cpu_temp}"'
+watch -n2 'curl -s localhost:3000/cpu_temp,gpu_temp,gpu_load'
 ```
 
 ### Scripting / piping
@@ -439,7 +381,7 @@ types.rs       → Shared data structures (zero-copy Arc<str> strings, typed Bat
 1. `SystemStats` is serialized into a `serde_json::Value` tree on each request.
 2. The URL path (`/cores/cpu0/usage`) is split into segments: `["cores", "cpu0", "usage"]`.
 3. Each segment navigates one level deeper — object fields by key, array items by `"name"`, wildcards (`*`/`all`) expand over all array items.
-4. Comma-separated last segments resolve multiple fields in parallel.
+4. Comma-separated last segments resolve multiple fields, preserving your specified order.
 5. The resolved value is returned as JSON.
 
 This means **any new field** added to `SystemStats` (or its nested structs) is instantly available as an endpoint — no manual route registration, no boilerplate.
