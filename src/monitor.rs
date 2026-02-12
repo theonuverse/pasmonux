@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use crate::types::{SystemStats, CoreData, StaticDeviceInfo, CpuSnap, DevicePaths};
 
-pub async fn run_super_fast_monitor(tx: watch::Sender<SystemStats>, paths: DevicePaths, static_info: Arc<StaticDeviceInfo>) {
+pub async fn run_monitor(tx: watch::Sender<SystemStats>, paths: DevicePaths, static_info: Arc<StaticDeviceInfo>) {
     let mut child = Command::new("rish").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let reader = BufReader::new(child.stdout.take().unwrap());
