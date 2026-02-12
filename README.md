@@ -2,7 +2,7 @@
 
 A lightweight REST API server that exposes real-time Android device stats over HTTP — built in Rust for [Termux](https://termux.dev).
 
-Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.app/) (`rish`) and serves it as a single JSON endpoint. Point any browser, script, or dashboard at `http://<device-ip>:3000/stats` and get live data instantly.
+Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.app/) (`rish`) and serves it as a clean JSON API. Every metric has its own endpoint — query everything at once, or drill into exactly the data you need.
 
 ## What it reports
 
@@ -15,8 +15,86 @@ Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.a
 | **GPU** | Load percentage |
 | **Per-core CPU** | Usage %, current / min / max frequency, model name |
 
+## API Reference
+
+All endpoints accept both **GET** and **POST** requests.
+
+### Discovery
+
+| Endpoint | Description |
+|---|---|
+| `/` | API index — lists every available endpoint |
+| `/stats` | Full system stats snapshot |
+
+### Device
+
+| Endpoint | Returns |
+|---|---|
+| `/manufacturer` | `{"manufacturer": "Nothing"}` |
+| `/product_model` | `{"product_model": "A065"}` |
+| `/soc_model` | `{"soc_model": "SM8475"}` |
+
+### System
+
+| Endpoint | Returns |
+|---|---|
+| `/uptime_seconds` | `{"uptime_seconds": 8928}` |
+| `/memory_used_mb` | `{"memory_used_mb": 5585.789}` |
+| `/memory_total_mb` | `{"memory_total_mb": 11260.543}` |
+
+### Thermal
+
+| Endpoint | Returns |
+|---|---|
+| `/cpu_temp` | `{"cpu_temp": 34.4}` |
+| `/gpu_temp` | `{"gpu_temp": 34.098}` |
+
+### Battery
+
+| Endpoint | Returns |
+|---|---|
+| `/battery_level` | `{"battery_level": 100}` |
+| `/battery_status` | `{"battery_status": "Full"}` |
+| `/battery_temp` | `{"battery_temp": 31.0}` |
+
+### GPU
+
+| Endpoint | Returns |
+|---|---|
+| `/gpu_load` | `{"gpu_load": 5.27}` |
+
+### Per-core CPU
+
+| Endpoint | Description |
+|---|---|
+| `/cores` | All cores (full array) |
+| `/cores/cpu0` | Full snapshot of core 0 |
+| `/cores/cpu0/usage` | `{"usage": 28.57}` |
+| `/cores/cpu0/model_name` | `{"model_name": "Cortex-A510"}` |
+| `/cores/cpu0/cur_freq` | `{"cur_freq": 1804.8}` |
+| `/cores/cpu0/min_freq` | `{"min_freq": 300.0}` |
+| `/cores/cpu0/max_freq` | `{"max_freq": 1804.8}` |
+
+> Replace `cpu0` with any core name (`cpu1`, `cpu2`, … `cpu7`, etc.).
+
+### Dynamic routing
+
+Endpoints are **generated automatically** from the data structure. If a new field is added to the stats in code, it becomes a reachable endpoint immediately — no routing changes required.
+
+### Error responses
+
+Unknown paths return `404` with a helpful JSON body:
+
+```json
+{
+  "error": "not found",
+  "path": "/nonexistent",
+  "hint": "GET / for available endpoints"
+}
+```
+
 <details>
-<summary>Example response</summary>
+<summary>Full /stats response example</summary>
 
 ```json
 {
@@ -139,81 +217,151 @@ asmo
 ```
 
 ```
-🚀 Asmo running on: http://192.168.1.42:3000/stats
+🚀 Asmo running on: http://192.168.1.42:3000
+   GET / for all available endpoints
 ```
 
 Open the printed URL from any device on the same network.
 
-## Querying with curl & jq
+## Examples
 
-Because Asmo is a plain HTTP JSON endpoint, you can integrate it with **any** tool that speaks HTTP.
-
-**Fetch raw JSON:**
+### Discover all endpoints
 
 ```sh
-curl -s localhost:3000/stats
-```
-
-**Pretty-print with jq:**
-
-```sh
-curl -s localhost:3000/stats | jq .
-```
-
-**Filter specific fields — e.g. battery level and status:**
-
-```sh
-curl -s localhost:3000/stats | jq '{battery_level, battery_status}'
+curl -s localhost:3000/ | jq .
 ```
 
 ```json
 {
-  "battery_level": 100,
-  "battery_status": "Full"
+  "name": "asmo",
+  "version": "0.3.0",
+  "endpoints": [
+    "/stats",
+    "/manufacturer",
+    "/battery_level",
+    "/cores",
+    "/cores/cpu0",
+    "/cores/cpu0/usage",
+    "..."
+  ],
+  "usage": "GET or POST any endpoint to retrieve its data."
 }
 ```
 
-**Get only CPU temperatures and GPU load:**
+### Full stats (GET or POST)
 
 ```sh
-curl -s localhost:3000/stats | jq '{cpu_temp, gpu_temp, gpu_load}'
+curl -s localhost:3000/stats | jq .
+curl -s -X POST localhost:3000/stats | jq .
 ```
 
-**List per-core usage as a compact table:**
+### Single fields
 
 ```sh
-curl -s localhost:3000/stats | jq -r '.cores[] | "\(.name)\t\(.usage)%\t\(.cur_freq) MHz"'
+# Battery level
+curl -s -X POST localhost:3000/battery_level
+# → {"battery_level":100}
+
+# GPU load
+curl -s -X POST localhost:3000/gpu_load
+# → {"gpu_load":5.27}
+
+# CPU temperature
+curl -s -X POST localhost:3000/cpu_temp
+# → {"cpu_temp":34.4}
+
+# Battery status
+curl -s -X POST localhost:3000/battery_status
+# → {"battery_status":"Full"}
+
+# Memory usage
+curl -s -X POST localhost:3000/memory_used_mb
+# → {"memory_used_mb":5585.789}
 ```
 
-```
-cpu0	28.57%	1804.8 MHz
-cpu1	14.29%	1440 MHz
-cpu2	26.98%	1440 MHz
-...
-```
-
-**Monitor continuously (poll every 2 s):**
+### Per-core CPU data
 
 ```sh
-watch -n2 'curl -s localhost:3000/stats | jq "{cpu_temp, gpu_temp, battery_level}"'
+# Full snapshot of cpu0
+curl -s -X POST localhost:3000/cores/cpu0 | jq .
 ```
 
-**Log to a file for later analysis:**
+```json
+{
+  "name": "cpu0",
+  "usage": 28.57,
+  "model_name": "Cortex-A510",
+  "cur_freq": 1804.8,
+  "min_freq": 300,
+  "max_freq": 1804.8
+}
+```
 
 ```sh
-while true; do curl -s localhost:3000/stats | jq -c . >> stats.jsonl; sleep 5; done
+# Just the usage of cpu0
+curl -s -X POST localhost:3000/cores/cpu0/usage
+# → {"usage":28.57}
+
+# Current frequency of cpu4
+curl -s -X POST localhost:3000/cores/cpu4/cur_freq
+# → {"cur_freq":1766.4}
+
+# Model name of cpu7
+curl -s -X POST localhost:3000/cores/cpu7/model_name
+# → {"model_name":"Cortex-X2"}
 ```
 
-**Feed into other programs** — pipe to `awk`, `gnuplot`, `grafana-agent`, a Discord webhook, Home Assistant, or anything else that consumes JSON. The endpoint is stateless and side-effect-free, so the possibilities are unlimited.
+### All cores at once
+
+```sh
+curl -s -X POST localhost:3000/cores | jq .
+```
+
+### Monitor continuously
+
+```sh
+# Poll battery every 2 seconds
+watch -n2 'curl -s -X POST localhost:3000/battery_level'
+
+# Poll GPU load + temps
+watch -n2 'curl -s localhost:3000/stats | jq "{gpu_load, gpu_temp, cpu_temp}"'
+```
+
+### Scripting / piping
+
+```sh
+# Log battery level to a file
+while true; do curl -s -X POST localhost:3000/battery_level >> battery.jsonl; sleep 5; done
+
+# Get all core usages in one line
+for i in $(seq 0 7); do
+  echo -n "cpu$i: "
+  curl -s -X POST localhost:3000/cores/cpu$i/usage | jq -r '.usage'
+done
+```
+
+### Integration
+
+The API is stateless and side-effect-free — pipe the JSON into `jq`, `awk`, `gnuplot`, Grafana, Home Assistant, Discord webhooks, or anything else that consumes JSON.
 
 ## Architecture
 
 ```
 main.rs        → Entrypoint — binds the HTTP server (Axum) on port 3000
+router.rs      → Dynamic router — resolves any URL path to a stats field at runtime
 discover.rs    → One-shot device probe at startup (thermal zones, core topology, SoC identity)
 monitor.rs     → Async polling loop — reads /proc and sysfs via a single rish session every 500 ms
 types.rs       → Shared data structures (zero-copy Arc<str> strings, typed BatteryStatus enum)
 ```
+
+### How dynamic routing works
+
+1. `SystemStats` is serialized into a `serde_json::Value` tree on each request.
+2. The URL path (`/cores/cpu0/usage`) is split into segments: `["cores", "cpu0", "usage"]`.
+3. Each segment navigates one level deeper — object fields by key, array items by `"name"`.
+4. The resolved value is returned as JSON.
+
+This means **any new field** added to `SystemStats` (or its nested structs) is instantly available as an endpoint — no manual route registration, no boilerplate.
 
 ## License
 

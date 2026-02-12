@@ -1,12 +1,10 @@
 mod discover;
 mod monitor;
+mod router;
 mod types;
 
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::routing::get;
-use axum::{Json, Router};
 use local_ip_address::local_ip;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -22,9 +20,7 @@ async fn main() {
 
     tokio::spawn(monitor::run_monitor(tx, paths, Arc::clone(&static_info)));
 
-    let app = Router::new()
-        .route("/stats", get(stats_handler))
-        .with_state(rx);
+    let app = router::build(rx);
 
     let listener = TcpListener::bind("0.0.0.0:3000")
         .await
@@ -34,13 +30,8 @@ async fn main() {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "localhost".into());
 
-    println!("\n\u{1F680} Asmo running on: http://{host}:3000/stats");
+    println!("\n\u{1F680} Asmo running on: http://{host}:3000");
+    println!("   GET / for all available endpoints\n");
 
     axum::serve(listener, app).await.expect("server error");
-}
-
-async fn stats_handler(
-    State(rx): State<watch::Receiver<SystemStats>>,
-) -> Json<SystemStats> {
-    Json(rx.borrow().clone())
 }
