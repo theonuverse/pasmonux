@@ -17,7 +17,7 @@ Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.a
 
 ## API Reference
 
-All endpoints accept both **GET** and **POST** requests.
+All endpoints use **GET** requests.
 
 ### Discovery
 
@@ -244,38 +244,37 @@ curl -s localhost:3000/ | jq .
     "/cores/cpu0/usage",
     "..."
   ],
-  "usage": "GET or POST any endpoint to retrieve its data."
+  "usage": "GET any endpoint to retrieve its data."
 }
 ```
 
-### Full stats (GET or POST)
+### Full stats
 
 ```sh
 curl -s localhost:3000/stats | jq .
-curl -s -X POST localhost:3000/stats | jq .
 ```
 
 ### Single fields
 
 ```sh
 # Battery level
-curl -s -X POST localhost:3000/battery_level
+curl -s localhost:3000/battery_level
 # → {"battery_level":100}
 
 # GPU load
-curl -s -X POST localhost:3000/gpu_load
+curl -s localhost:3000/gpu_load
 # → {"gpu_load":5.27}
 
 # CPU temperature
-curl -s -X POST localhost:3000/cpu_temp
+curl -s localhost:3000/cpu_temp
 # → {"cpu_temp":34.4}
 
 # Battery status
-curl -s -X POST localhost:3000/battery_status
+curl -s localhost:3000/battery_status
 # → {"battery_status":"Full"}
 
 # Memory usage
-curl -s -X POST localhost:3000/memory_used_mb
+curl -s localhost:3000/memory_used_mb
 # → {"memory_used_mb":5585.789}
 ```
 
@@ -283,7 +282,7 @@ curl -s -X POST localhost:3000/memory_used_mb
 
 ```sh
 # Full snapshot of cpu0
-curl -s -X POST localhost:3000/cores/cpu0 | jq .
+curl -s localhost:3000/cores/cpu0 | jq .
 ```
 
 ```json
@@ -299,29 +298,29 @@ curl -s -X POST localhost:3000/cores/cpu0 | jq .
 
 ```sh
 # Just the usage of cpu0
-curl -s -X POST localhost:3000/cores/cpu0/usage
+curl -s localhost:3000/cores/cpu0/usage
 # → {"usage":28.57}
 
 # Current frequency of cpu4
-curl -s -X POST localhost:3000/cores/cpu4/cur_freq
+curl -s localhost:3000/cores/cpu4/cur_freq
 # → {"cur_freq":1766.4}
 
 # Model name of cpu7
-curl -s -X POST localhost:3000/cores/cpu7/model_name
+curl -s localhost:3000/cores/cpu7/model_name
 # → {"model_name":"Cortex-X2"}
 ```
 
 ### All cores at once
 
 ```sh
-curl -s -X POST localhost:3000/cores | jq .
+curl -s localhost:3000/cores | jq .
 ```
 
 ### Monitor continuously
 
 ```sh
 # Poll battery every 2 seconds
-watch -n2 'curl -s -X POST localhost:3000/battery_level'
+watch -n2 'curl -s localhost:3000/battery_level'
 
 # Poll GPU load + temps
 watch -n2 'curl -s localhost:3000/stats | jq "{gpu_load, gpu_temp, cpu_temp}"'
@@ -331,12 +330,12 @@ watch -n2 'curl -s localhost:3000/stats | jq "{gpu_load, gpu_temp, cpu_temp}"'
 
 ```sh
 # Log battery level to a file
-while true; do curl -s -X POST localhost:3000/battery_level >> battery.jsonl; sleep 5; done
+while true; do curl -s localhost:3000/battery_level >> battery.jsonl; sleep 5; done
 
 # Get all core usages in one line
 for i in $(seq 0 7); do
   echo -n "cpu$i: "
-  curl -s -X POST localhost:3000/cores/cpu$i/usage | jq -r '.usage'
+  curl -s localhost:3000/cores/cpu$i/usage | jq -r '.usage'
 done
 ```
 

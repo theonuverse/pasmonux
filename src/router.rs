@@ -19,24 +19,24 @@ use crate::types::SystemStats;
 ///
 /// # Routes
 ///
-/// | Method      | Path                    | Description                        |
-/// |-------------|-------------------------|------------------------------------|
-/// | `GET\|POST` | `/`                     | API index — lists every endpoint   |
-/// | `GET\|POST` | `/stats`                | Full system stats snapshot         |
-/// | `GET\|POST` | `/<field>`              | Single top-level field             |
-/// | `GET\|POST` | `/cores/<name>`         | Single core by name                |
-/// | `GET\|POST` | `/cores/<name>/<field>` | Single field of a specific core    |
+/// | Method | Path                    | Description                        |
+/// |--------|-------------------------|------------------------------------|
+/// | `GET`  | `/`                     | API index — lists every endpoint   |
+/// | `GET`  | `/stats`                | Full system stats snapshot         |
+/// | `GET`  | `/<field>`              | Single top-level field             |
+/// | `GET`  | `/cores/<name>`         | Single core by name                |
+/// | `GET`  | `/cores/<name>/<field>` | Single field of a specific core    |
 pub fn build(rx: watch::Receiver<SystemStats>) -> Router {
     Router::new()
-        .route("/", get(index).post(index))
-        .route("/stats", get(stats).post(stats))
-        .route("/{*path}", get(resolve).post(resolve))
+        .route("/", get(index))
+        .route("/stats", get(stats))
+        .route("/*path", get(resolve))
         .with_state(rx)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
-/// `GET|POST /` — Returns the API index with every available endpoint.
+/// `GET /` — Returns the API index with every available endpoint.
 async fn index(State(rx): State<watch::Receiver<SystemStats>>) -> Json<Value> {
     let stats = rx.borrow().clone();
     let tree = serde_json::to_value(&stats).unwrap_or_default();
@@ -47,16 +47,16 @@ async fn index(State(rx): State<watch::Receiver<SystemStats>>) -> Json<Value> {
         "name": "asmo",
         "version": env!("CARGO_PKG_VERSION"),
         "endpoints": endpoints,
-        "usage": "GET or POST any endpoint to retrieve its data."
+        "usage": "GET any endpoint to retrieve its data."
     }))
 }
 
-/// `GET|POST /stats` — Returns the full system stats snapshot.
+/// `GET /stats` — Returns the full system stats snapshot.
 async fn stats(State(rx): State<watch::Receiver<SystemStats>>) -> Json<SystemStats> {
     Json(rx.borrow().clone())
 }
 
-/// `GET|POST /{path}` — Resolves an arbitrary path against the current stats.
+/// `GET /{path}` — Resolves an arbitrary path against the current stats.
 async fn resolve(
     State(rx): State<watch::Receiver<SystemStats>>,
     Path(path): Path<String>,
