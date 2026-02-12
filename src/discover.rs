@@ -81,7 +81,7 @@ pub fn discover_device_layout() -> (DevicePaths, StaticDeviceInfo) {
         a_num.cmp(&b_num)
     });
 
-    let paths = DevicePaths { cpu_temp, gpu_temp, core_count };
+    let paths = DevicePaths { cpu_temp, gpu_temp };
     let static_info = StaticDeviceInfo {
         manufacturer,
         product_model,
