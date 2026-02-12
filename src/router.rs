@@ -42,8 +42,7 @@ pub fn build(rx: watch::Receiver<SystemStats>) -> Router {
 
 /// `GET /` — Returns the API index with every available endpoint.
 async fn index(State(rx): State<watch::Receiver<SystemStats>>) -> Json<Value> {
-    let stats = rx.borrow().clone();
-    let tree = serde_json::to_value(&stats).unwrap_or_default();
+    let tree = stats_to_value(&rx.borrow());
     let mut endpoints = vec!["/stats".to_owned()];
     enumerate_endpoints(&tree, "", &mut endpoints);
 
@@ -70,11 +69,7 @@ async fn resolve(
     State(rx): State<watch::Receiver<SystemStats>>,
     Path(path): Path<String>,
 ) -> Response {
-    let stats = rx.borrow().clone();
-    let tree = match serde_json::to_value(&stats) {
-        Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal serialization error", &path),
-    };
+    let tree = stats_to_value(&rx.borrow());
 
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -98,6 +93,37 @@ fn error_response(status: StatusCode, message: &str, path: &str) -> Response {
 }
 
 // ─── Path resolution ───────────────────────────────────────────────────────
+
+/// Serialize [`SystemStats`] into a JSON value tree with clean `f32` precision.
+///
+/// `serde_json::to_value` promotes `f32` → `f64`, introducing artifacts like
+/// `556.7999877929688` instead of `556.8`.  This function walks the tree after
+/// conversion and casts every float back through `f32` to recover the short
+/// representation.
+fn stats_to_value(stats: &SystemStats) -> Value {
+    let mut tree = serde_json::to_value(stats).unwrap_or_default();
+    clean_f32_precision(&mut tree);
+    tree
+}
+
+/// Recursively round every float in a JSON tree to `f32` precision.
+fn clean_f32_precision(value: &mut Value) {
+    match value {
+        Value::Number(n) => {
+            // Only touch floats — leave integers untouched.
+            if n.as_u64().is_none() && n.as_i64().is_none() {
+                if let Some(f) = n.as_f64() {
+                    if let Some(clean) = serde_json::Number::from_f64((f as f32) as f64) {
+                        *n = clean;
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(clean_f32_precision),
+        Value::Object(map) => map.values_mut().for_each(clean_f32_precision),
+        _ => {}
+    }
+}
 
 /// Returns `true` for wildcard tokens (`*` and `all`).
 #[inline]
