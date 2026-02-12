@@ -1,11 +1,12 @@
 [package]
-name = "pasmonux"
-version = "0.1.0"
+name = "asmo"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 axum = "0.7"
-tokio = { version = "1.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 local-ip-address = "0.6"
+scopeguard = "1"
