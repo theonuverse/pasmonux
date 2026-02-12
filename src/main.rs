@@ -34,7 +34,7 @@ async fn main() {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "localhost".into());
 
-    println!("\n\u{1F680} Pasmonux API: http://{host}:3000/stats");
+    println!("\n\u{1F680} Asmo running on: http://{host}:3000/stats");
 
     axum::serve(listener, app).await.expect("server error");
 }
