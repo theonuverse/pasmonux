@@ -181,8 +181,7 @@ fn resolve_request(value: &Value, segments: &[&str]) -> Option<Value> {
                 if is_last {
                     return Some(item.clone());
                 }
-                let resolved = resolve_request(item, rest)?;
-                Some(attach_name(resolved, item.get("name").cloned()))
+                resolve_request(item, rest)
             })
             .collect();
         return if results.is_empty() { None } else { Some(Value::Array(results)) };
@@ -221,16 +220,6 @@ fn resolve_comma_fields(value: &Value, raw: &str) -> Option<Value> {
         }
     }
     if result.is_empty() { None } else { Some(Value::Object(result)) }
-}
-
-/// Prepend a `"name"` key to an object for identification in wildcard results.
-fn attach_name(value: Value, name: Option<Value>) -> Value {
-    let Some(name_val) = name else { return value };
-    let Value::Object(fields) = value else { return value };
-    let mut out = serde_json::Map::with_capacity(fields.len() + 1);
-    out.insert("name".to_string(), name_val);
-    out.extend(fields);
-    Value::Object(out)
 }
 
 // ─── Endpoint enumeration ──────────────────────────────────────────────────
