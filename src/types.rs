@@ -54,8 +54,6 @@ pub struct SystemStats {
     pub memory_total_mb: f32,
     pub swap_used_mb: f32,
     pub swap_total_mb: f32,
-    pub tx_bytes_mb: f32,
-    pub rx_bytes_mb: f32,
     pub storage_free_gb: f32,
     pub storage_total_gb: f32,
     pub refresh_rate: f32,

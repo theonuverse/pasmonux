@@ -14,7 +14,6 @@ Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.a
 | **Thermal** | CPU temperature, GPU temperature | sysfs thermal zones | 500ms |
 | **Battery** | Level, status, temperature | `dumpsys battery` via rish | 500ms |
 | **GPU** | Load percentage | sysfs kgsl | 500ms |
-| **Network** | TX MB, RX MB (cumulative) | `/proc/net/dev` via rish | 500ms |
 | **Storage** | Free / total GB | `statvfs("/data")` | 30s |
 | **Display** | Refresh rate, brightness | `dumpsys display` via rish | 500ms |
 | **Per-core CPU** | Usage %, current / min / max frequency, model name | sysfs / `/proc/stat` | 500ms |
@@ -52,8 +51,6 @@ Every top-level field in the stats is its own endpoint:
 | `/memory_total_mb` | `{"memory_total_mb": 11260.543}` |
 | `/swap_used_mb` | `{"swap_used_mb": 2418.5}` |
 | `/swap_total_mb` | `{"swap_total_mb": 4096.0}` |
-| `/tx_bytes_mb` | `{"tx_bytes_mb": 3639.7}` |
-| `/rx_bytes_mb` | `{"rx_bytes_mb": 113700.5}` |
 | `/storage_free_gb` | `{"storage_free_gb": 84.3}` |
 | `/storage_total_gb` | `{"storage_total_gb": 236.1}` |
 | `/refresh_rate` | `{"refresh_rate": 120.0}` |
@@ -148,8 +145,6 @@ curl -s localhost:3000/stats | jq '{gpu_load, cores: [.cores[] | {name, usage}]}
   "memory_total_mb": 11260.543,
   "swap_used_mb": 2418.5,
   "swap_total_mb": 4096.0,
-  "tx_bytes_mb": 3639.7,
-  "rx_bytes_mb": 113700.5,
   "storage_free_gb": 84.3,
   "storage_total_gb": 236.1,
   "refresh_rate": 120.0,

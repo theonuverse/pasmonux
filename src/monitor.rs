@@ -24,11 +24,10 @@ pub async fn run_monitor(
 ) {
     let core_len = static_info.cores.len();
 
-    // Fast rish batch — runs every tick (network + cpu + battery + display brightness).
+    // Rish batch — runs every tick (cpu + battery + display).
     let fast_cmd = b"echo UPTIME $(cat /proc/uptime); \
                      cat /proc/stat; \
                      dumpsys battery | grep -E 'level|status|temp'; \
-                     echo NET_DATA; cat /proc/net/dev; echo NET_END; \
                      echo DISPLAY_DATA; \
                      dumpsys display | grep -oE 'mBrightness=[0-9.]+|mActiveRenderFrameRate=[0-9.]+'; \
                      echo DISPLAY_END; \
@@ -92,9 +91,6 @@ pub async fn run_monitor(
         let mut battery_level = 0_i32;
         let mut battery_status = BatteryStatus::Unknown;
         let mut uptime_seconds = 0_u64;
-        let mut tx_bytes = 0_u64;
-        let mut rx_bytes = 0_u64;
-        let mut in_net_section = false;
         let mut in_display_section = false;
         let mut brightness = 0.0_f32;
         let mut refresh_rate = 0.0_f32;
@@ -109,14 +105,6 @@ pub async fn run_monitor(
             }
 
             // ── Section markers ──────────────────────────────────────
-            if line == "NET_DATA" {
-                in_net_section = true;
-                continue;
-            }
-            if line == "NET_END" {
-                in_net_section = false;
-                continue;
-            }
             if line == "DISPLAY_DATA" {
                 in_display_section = true;
                 continue;
@@ -126,21 +114,6 @@ pub async fn run_monitor(
                 continue;
             }
 
-            // ── Network section ──────────────────────────────────────
-            if in_net_section {
-                // /proc/net/dev: iface: rx_bytes rx_packets … tx_bytes …
-                if let Some((iface, rest)) = line.split_once(':') {
-                    let iface = iface.trim();
-                    if iface != "lo" {
-                        let fields: Vec<&str> = rest.split_whitespace().collect();
-                        if fields.len() >= 10 {
-                            rx_bytes += fields[0].parse::<u64>().unwrap_or(0);
-                            tx_bytes += fields[8].parse::<u64>().unwrap_or(0);
-                        }
-                    }
-                }
-                continue;
-            }
 
             // ── Display section ──────────────────────────────────────
             if in_display_section {
@@ -228,8 +201,6 @@ pub async fn run_monitor(
             memory_total_mb,
             swap_used_mb: (swap_total_mb - swap_free_mb).max(0.0),
             swap_total_mb,
-            tx_bytes_mb: tx_bytes as f32 / (1024.0 * 1024.0),
-            rx_bytes_mb: rx_bytes as f32 / (1024.0 * 1024.0),
             storage_free_gb: cached_storage_free_gb,
             storage_total_gb: cached_storage_total_gb,
             refresh_rate,
