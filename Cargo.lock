@@ -7,6 +7,7 @@ name = "asmo"
 version = "0.3.0"
 dependencies = [
  "axum",
+ "libc",
  "local-ip-address",
  "scopeguard",
  "serde",

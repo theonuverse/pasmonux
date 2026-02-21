@@ -31,6 +31,16 @@ impl BatteryStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Per-cluster CPU governor info.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Default)]
+pub struct GovernorInfo {
+    pub cluster: Arc<str>,
+    pub governor: Arc<str>,
+}
+
+// ---------------------------------------------------------------------------
 // Main stats payload — sent over the watch channel every tick.
 // `Arc<str>` for strings that never change: cloning is a single atomic inc.
 // ---------------------------------------------------------------------------
@@ -40,6 +50,8 @@ pub struct SystemStats {
     pub manufacturer: Arc<str>,
     pub product_model: Arc<str>,
     pub soc_model: Arc<str>,
+    pub kernel_version: Arc<str>,
+    pub android_version: Arc<str>,
 
     pub uptime_seconds: u64,
     pub battery_level: i32,
@@ -50,8 +62,17 @@ pub struct SystemStats {
     pub gpu_load: f32,
     pub memory_used_mb: f32,
     pub memory_total_mb: f32,
+    pub zram_used_mb: f32,
+    pub swap_total_mb: f32,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub storage_free_gb: f32,
+    pub storage_total_gb: f32,
+    pub refresh_rate: f32,
+    pub brightness: f32,
 
     pub cores: Vec<CoreData>,
+    pub cpu_governors: Vec<GovernorInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +110,8 @@ pub struct StaticDeviceInfo {
     pub manufacturer: Arc<str>,
     pub product_model: Arc<str>,
     pub soc_model: Arc<str>,
+    pub kernel_version: Arc<str>,
+    pub android_version: Arc<str>,
     pub cores: Box<[StaticCoreInfo]>,
 }
 

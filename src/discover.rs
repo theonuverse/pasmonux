@@ -11,6 +11,7 @@ use crate::types::{DevicePaths, StaticCoreInfo, StaticDeviceInfo};
 pub fn discover_device_layout() -> (DevicePaths, StaticDeviceInfo) {
     let (cpu_temp, gpu_temp, core_count) = probe_thermal_and_cores();
     let (manufacturer, product_model, soc_model) = probe_device_props();
+    let (kernel_version, android_version) = probe_system_versions();
     let cores = probe_core_info(core_count);
 
     let paths = DevicePaths {
@@ -22,6 +23,8 @@ pub fn discover_device_layout() -> (DevicePaths, StaticDeviceInfo) {
         manufacturer: Arc::from(manufacturer),
         product_model: Arc::from(product_model),
         soc_model: Arc::from(soc_model),
+        kernel_version: Arc::from(kernel_version),
+        android_version: Arc::from(android_version),
         cores: cores.into_boxed_slice(),
     };
 
@@ -94,6 +97,25 @@ fn probe_device_props() -> (String, String, String) {
         get("ro.product.model"),
         get("ro.soc.model"),
     )
+}
+
+/// Read kernel and Android version (static, called once at startup).
+fn probe_system_versions() -> (String, String) {
+    let kernel_version = std::fs::read_to_string("/proc/version")
+        .unwrap_or_default()
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or("unknown")
+        .to_owned();
+
+    let android_version = Command::new("getprop")
+        .arg("ro.build.version.release")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+
+    (kernel_version, android_version)
 }
 
 /// Gather static per-core info from `lscpu`.

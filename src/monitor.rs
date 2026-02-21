@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -6,10 +7,12 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::types::{
-    BatteryStatus, CoreData, CpuSnap, DevicePaths, StaticDeviceInfo, SystemStats,
+    BatteryStatus, CoreData, CpuSnap, DevicePaths, GovernorInfo, StaticDeviceInfo, SystemStats,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const SLOW_TICK_INTERVAL: u64 = 10; // 10 ticks = 5 s
+const STORAGE_TICK_INTERVAL: u64 = 60; // 60 ticks = 30 s
 
 // ---------------------------------------------------------------------------
 // Hot monitoring loop — spawned once, runs forever.
@@ -22,11 +25,22 @@ pub async fn run_monitor(
 ) {
     let core_len = static_info.cores.len();
 
-    // Rish batch — only commands that require elevated privileges.
-    let cmd = b"echo UPTIME $(cat /proc/uptime); \
-               cat /proc/stat; \
-               dumpsys battery | grep -E 'level|status|temp'; \
-               echo 'END_OF_BATCH'\n";
+    // Fast rish batch — runs every tick (network + cpu + battery).
+    let fast_cmd = b"echo UPTIME $(cat /proc/uptime); \
+                     cat /proc/stat; \
+                     dumpsys battery | grep -E 'level|status|temp'; \
+                     echo NET_DATA; cat /proc/net/dev; echo NET_END; \
+                     echo 'END_OF_BATCH'\n";
+
+    // Slow rish batch — also grabs display info (every SLOW_TICK_INTERVAL).
+    let slow_cmd = b"echo UPTIME $(cat /proc/uptime); \
+                     cat /proc/stat; \
+                     dumpsys battery | grep -E 'level|status|temp'; \
+                     echo NET_DATA; cat /proc/net/dev; echo NET_END; \
+                     echo DISPLAY_DATA; \
+                     dumpsys display | grep -oE 'mBrightness=[0-9.]+|mActiveRenderFrameRate=[0-9.]+'; \
+                     echo DISPLAY_END; \
+                     echo 'END_OF_BATCH'\n";
 
     // Spawn a single long-lived `rish` shell.
     let mut child = Command::new("rish")
@@ -48,15 +62,38 @@ pub async fn run_monitor(
     let mut core_snaps: Vec<CpuSnap> = (0..core_len).map(|_| CpuSnap::default()).collect();
     let mut core_usages = vec![0.0_f32; core_len];
 
+    // Slow-tick cached state — retained between iterations.
+    let mut tick: u64 = 0;
+    let mut cached_refresh_rate = 0.0_f32;
+    let mut cached_brightness = 0.0_f32;
+    let mut cached_storage_free_gb = 0.0_f32;
+    let mut cached_storage_total_gb = 0.0_f32;
+    let mut cached_cpu_governors: Vec<GovernorInfo> = Vec::new();
+
     loop {
+        let is_slow_tick = tick % SLOW_TICK_INTERVAL == 0;
+        let is_storage_tick = tick % STORAGE_TICK_INTERVAL == 0;
+
         // ── Direct sysfs/procfs reads (no privilege needed) ──────────
         let cpu_temp = read_sysfs_thermal(&paths.cpu_temp);
         let gpu_temp = read_sysfs_thermal(&paths.gpu_temp);
         let gpu_load = read_gpu_load();
-        let (memory_total_mb, memory_avail_mb) = read_memory();
+        let (memory_total_mb, memory_avail_mb, swap_total_mb) = read_memory();
         let cur_freqs = read_cpu_freqs(core_len);
+        let zram_used_mb = read_zram_used_mb();
+
+        // Slow direct reads.
+        if is_slow_tick {
+            cached_cpu_governors = read_cpu_governors();
+        }
+        if is_storage_tick {
+            let (free, total) = read_storage();
+            cached_storage_free_gb = free;
+            cached_storage_total_gb = total;
+        }
 
         // ── Privileged reads via rish ────────────────────────────────
+        let cmd = if is_slow_tick { &slow_cmd[..] } else { &fast_cmd[..] };
         if stdin.write_all(cmd).is_err() || stdin.flush().is_err() {
             break;
         }
@@ -67,6 +104,12 @@ pub async fn run_monitor(
         let mut battery_level = 0_i32;
         let mut battery_status = BatteryStatus::Unknown;
         let mut uptime_seconds = 0_u64;
+        let mut tx_bytes = 0_u64;
+        let mut rx_bytes = 0_u64;
+        let mut in_net_section = false;
+        let mut in_display_section = false;
+        let mut brightness_found = false;
+        let mut refresh_rate_found = false;
 
         while let Some(Ok(raw_line)) = lines.next() {
             let line = raw_line.trim();
@@ -75,6 +118,57 @@ pub async fn run_monitor(
                 break;
             }
 
+            // ── Section markers ──────────────────────────────────────
+            if line == "NET_DATA" {
+                in_net_section = true;
+                continue;
+            }
+            if line == "NET_END" {
+                in_net_section = false;
+                continue;
+            }
+            if line == "DISPLAY_DATA" {
+                in_display_section = true;
+                continue;
+            }
+            if line == "DISPLAY_END" {
+                in_display_section = false;
+                continue;
+            }
+
+            // ── Network section ──────────────────────────────────────
+            if in_net_section {
+                // /proc/net/dev: iface: rx_bytes rx_packets … tx_bytes …
+                if let Some((iface, rest)) = line.split_once(':') {
+                    let iface = iface.trim();
+                    if iface != "lo" {
+                        let fields: Vec<&str> = rest.split_whitespace().collect();
+                        if fields.len() >= 10 {
+                            rx_bytes += fields[0].parse::<u64>().unwrap_or(0);
+                            tx_bytes += fields[8].parse::<u64>().unwrap_or(0);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // ── Display section ──────────────────────────────────────
+            if in_display_section {
+                if let Some(val) = line.strip_prefix("mBrightness=") {
+                    if !brightness_found {
+                        cached_brightness = val.parse().unwrap_or(0.0);
+                        brightness_found = true;
+                    }
+                } else if let Some(val) = line.strip_prefix("mActiveRenderFrameRate=") {
+                    if !refresh_rate_found {
+                        cached_refresh_rate = val.parse().unwrap_or(0.0);
+                        refresh_rate_found = true;
+                    }
+                }
+                continue;
+            }
+
+            // ── Normal section (uptime / cpu / battery) ──────────────
             let (tag, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
 
             match tag {
@@ -131,6 +225,8 @@ pub async fn run_monitor(
             manufacturer: Arc::clone(&static_info.manufacturer),
             product_model: Arc::clone(&static_info.product_model),
             soc_model: Arc::clone(&static_info.soc_model),
+            kernel_version: Arc::clone(&static_info.kernel_version),
+            android_version: Arc::clone(&static_info.android_version),
             uptime_seconds,
             battery_level,
             battery_status,
@@ -140,10 +236,20 @@ pub async fn run_monitor(
             gpu_load,
             memory_used_mb: (memory_total_mb - memory_avail_mb).max(0.0),
             memory_total_mb,
+            zram_used_mb,
+            swap_total_mb,
+            tx_bytes,
+            rx_bytes,
+            storage_free_gb: cached_storage_free_gb,
+            storage_total_gb: cached_storage_total_gb,
+            refresh_rate: cached_refresh_rate,
+            brightness: cached_brightness,
             cores,
+            cpu_governors: cached_cpu_governors.clone(),
         };
 
         let _ = tx.send(stats);
+        tick += 1;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -177,20 +283,24 @@ fn read_gpu_load() -> f32 {
     }
 }
 
-/// Read MemTotal and MemAvailable from `/proc/meminfo`, returns (total_mb, available_mb).
+/// Read MemTotal, MemAvailable, and SwapTotal from `/proc/meminfo`.
+/// Returns (total_mb, available_mb, swap_total_mb).
 #[inline]
-fn read_memory() -> (f32, f32) {
+fn read_memory() -> (f32, f32, f32) {
     let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let mut total = 0.0_f32;
     let mut avail = 0.0_f32;
+    let mut swap_total = 0.0_f32;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             total = parse_or_zero(rest.trim()) / 1024.0;
         } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
             avail = parse_or_zero(rest.trim()) / 1024.0;
+        } else if let Some(rest) = line.strip_prefix("SwapTotal:") {
+            swap_total = parse_or_zero(rest.trim()) / 1024.0;
         }
     }
-    (total, avail)
+    (total, avail, swap_total)
 }
 
 /// Read current frequency for each core from sysfs, returns MHz.
@@ -206,6 +316,61 @@ fn read_cpu_freqs(count: usize) -> Vec<f32> {
                 / 1000.0
         })
         .collect()
+}
+
+/// Read ZRAM memory usage from sysfs.
+/// `/sys/block/zram0/mm_stat` column 2 (0-indexed) = `mem_used_total` in bytes.
+#[inline]
+fn read_zram_used_mb() -> f32 {
+    std::fs::read_to_string("/sys/block/zram0/mm_stat")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(2)?.parse::<f64>().ok())
+        .map(|bytes| (bytes / (1024.0 * 1024.0)) as f32)
+        .unwrap_or(0.0)
+}
+
+/// Read storage free/total for `/data` via `statvfs`.
+/// Returns (free_gb, total_gb).
+#[inline]
+fn read_storage() -> (f32, f32) {
+    let path = CString::new("/data").unwrap();
+    unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
+            let bs = stat.f_frsize as f64;
+            let total = (stat.f_blocks as f64 * bs) / (1024.0 * 1024.0 * 1024.0);
+            let free = (stat.f_bavail as f64 * bs) / (1024.0 * 1024.0 * 1024.0);
+            (free as f32, total as f32)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+}
+
+/// Read scaling governor for each cpufreq policy (= cluster).
+fn read_cpu_governors() -> Vec<GovernorInfo> {
+    let mut governors = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu/cpufreq") else {
+        return governors;
+    };
+    let mut policies: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("policy"))
+        .collect();
+    policies.sort_by_key(|e| e.file_name());
+
+    for entry in policies {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let governor = std::fs::read_to_string(entry.path().join("scaling_governor"))
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        governors.push(GovernorInfo {
+            cluster: Arc::from(name.as_str()),
+            governor: Arc::from(governor.as_str()),
+        });
+    }
+    governors
 }
 
 // ---------------------------------------------------------------------------
