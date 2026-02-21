@@ -101,12 +101,12 @@ fn probe_device_props() -> (String, String, String) {
 
 /// Read kernel and Android version (static, called once at startup).
 fn probe_system_versions() -> (String, String) {
-    let kernel_version = std::fs::read_to_string("/proc/version")
-        .unwrap_or_default()
-        .split_whitespace()
-        .nth(2)
-        .unwrap_or("unknown")
-        .to_owned();
+    let kernel_version = Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
 
     let android_version = Command::new("getprop")
         .arg("ro.build.version.release")

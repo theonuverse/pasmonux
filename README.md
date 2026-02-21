@@ -9,15 +9,14 @@ Asmo polls hardware telemetry every 500 ms via [Shizuku](https://shizuku.rikka.a
 | Category | Fields | Source | Refresh |
 |---|---|---|---|
 | **Device** | Manufacturer, product model, SoC model | `getprop` | Static |
-| **System** | Kernel version, Android version, uptime | `/proc/version` / `getprop` | Static / 500ms |
-| **Memory** | Used / total, ZRAM used, swap total | `/proc/meminfo` / sysfs | 500ms |
+| **System** | Kernel version, Android version, uptime | `uname -r` / `getprop` | Static / 500ms |
+| **Memory** | Used / total, swap used / total | `/proc/meminfo` | 500ms |
 | **Thermal** | CPU temperature, GPU temperature | sysfs thermal zones | 500ms |
 | **Battery** | Level, status, temperature | `dumpsys battery` via rish | 500ms |
 | **GPU** | Load percentage | sysfs kgsl | 500ms |
-| **Network** | TX bytes, RX bytes (cumulative) | `/proc/net/dev` via rish | 500ms |
+| **Network** | TX MB, RX MB (cumulative) | `/proc/net/dev` via rish | 500ms |
 | **Storage** | Free / total GB | `statvfs("/data")` | 30s |
-| **CPU governors** | Governor per cluster (policy) | sysfs cpufreq | 5s |
-| **Display** | Refresh rate, brightness | `dumpsys display` via rish | 5s |
+| **Display** | Refresh rate, brightness | `dumpsys display` via rish | 500ms |
 | **Per-core CPU** | Usage %, current / min / max frequency, model name | sysfs / `/proc/stat` | 500ms |
 
 ## API Reference
@@ -51,10 +50,10 @@ Every top-level field in the stats is its own endpoint:
 | `/gpu_load` | `{"gpu_load": 5.27}` |
 | `/memory_used_mb` | `{"memory_used_mb": 5585.789}` |
 | `/memory_total_mb` | `{"memory_total_mb": 11260.543}` |
-| `/zram_used_mb` | `{"zram_used_mb": 412.5}` |
+| `/swap_used_mb` | `{"swap_used_mb": 2418.5}` |
 | `/swap_total_mb` | `{"swap_total_mb": 4096.0}` |
-| `/tx_bytes` | `{"tx_bytes": 1234567890}` |
-| `/rx_bytes` | `{"rx_bytes": 9876543210}` |
+| `/tx_bytes_mb` | `{"tx_bytes_mb": 3639.7}` |
+| `/rx_bytes_mb` | `{"rx_bytes_mb": 113700.5}` |
 | `/storage_free_gb` | `{"storage_free_gb": 84.3}` |
 | `/storage_total_gb` | `{"storage_total_gb": 236.1}` |
 | `/refresh_rate` | `{"refresh_rate": 120.0}` |
@@ -73,16 +72,6 @@ Every top-level field in the stats is its own endpoint:
 | `/cores/cpu0/max_freq` | `{"max_freq": 1804.8}` |
 
 > Replace `cpu0` with any core name (`cpu1`, `cpu2`, … `cpu7`, etc.).
-
-### CPU governors
-
-| Endpoint | Description |
-|---|---|
-| `/cpu_governors` | All cluster governors |
-| `/cpu_governors/policy0` | Governor for cluster 0 |
-| `/cpu_governors/policy0/governor` | `{"governor": "schedutil"}` |
-
-> Replace `policy0` with any policy name (`policy4`, `policy7`, etc.).
 
 ### Multi-field queries
 
@@ -157,10 +146,10 @@ curl -s localhost:3000/stats | jq '{gpu_load, cores: [.cores[] | {name, usage}]}
   "gpu_load": 5.2692976,
   "memory_used_mb": 5585.789,
   "memory_total_mb": 11260.543,
-  "zram_used_mb": 412.5,
+  "swap_used_mb": 2418.5,
   "swap_total_mb": 4096.0,
-  "tx_bytes": 1234567890,
-  "rx_bytes": 9876543210,
+  "tx_bytes_mb": 3639.7,
+  "rx_bytes_mb": 113700.5,
   "storage_free_gb": 84.3,
   "storage_total_gb": 236.1,
   "refresh_rate": 120.0,
@@ -230,11 +219,6 @@ curl -s localhost:3000/stats | jq '{gpu_load, cores: [.cores[] | {name, usage}]}
       "min_freq": 787.2,
       "max_freq": 2995.2
     }
-  ],
-  "cpu_governors": [
-    {"cluster": "policy0", "governor": "schedutil"},
-    {"cluster": "policy4", "governor": "schedutil"},
-    {"cluster": "policy7", "governor": "schedutil"}
   ]
 }
 ```
@@ -413,7 +397,7 @@ main.rs        → Entrypoint — binds the HTTP server (Axum) on port 3000
 router.rs      → Dynamic router — resolves any URL path to a stats field at runtime
 discover.rs    → One-shot device probe at startup (thermal zones, core topology, SoC identity)
 monitor.rs     → Async polling loop — sysfs reads + rish for privileged data (battery, uptime, /proc/stat, network, display)
-types.rs       → Shared data structures (zero-copy Arc<str> strings, typed BatteryStatus enum, GovernorInfo)
+types.rs       → Shared data structures (zero-copy Arc<str> strings, typed BatteryStatus enum)
 ```
 
 ### How dynamic routing works
